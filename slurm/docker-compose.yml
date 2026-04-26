@@ -1,0 +1,54 @@
+version: '3.8'
+
+# Both services share the same image; the entrypoint decides the role.
+x-slurm-base: &slurm-base
+  build:
+    context: ./docker
+  restart: unless-stopped
+  networks:
+    - slurm-net
+
+services:
+  slurmctld:
+    <<: *slurm-base
+    container_name: slurmctld
+    hostname: slurmctld
+    entrypoint: ["/entrypoints/controller.sh"]
+    volumes:
+      - ./conf:/etc/slurm:ro
+      # No host job directory. Scripts are piped in via `docker exec -i` and
+      # deleted immediately after sbatch queues them.
+      - slurm-state:/var/spool/slurmctld
+      - munge-key:/etc/munge
+      - slurm-log:/var/log/slurm
+
+  node01:
+    <<: *slurm-base
+    container_name: node01
+    hostname: node01
+    entrypoint: ["/entrypoints/node.sh"]
+    cpus: 4.0
+    mem_limit: 4g
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./conf:/etc/slurm:ro
+      # No host directories at all. The node container sees zero host filesystem.
+      # Job scripts land in /tmp (Slurm's internal spool) and output is retrieved
+      # via `docker exec cat` by the coordinator after the job finishes.
+      - slurm-spool:/var/spool/slurmd
+      - munge-key:/etc/munge
+      - slurm-log:/var/log/slurm
+    depends_on:
+      - slurmctld
+
+networks:
+  slurm-net:
+    driver: bridge
+
+volumes:
+  slurm-state:
+  slurm-spool:
+  # munge-key is shared between controller and node so they use the same secret.
+  munge-key:
+  slurm-log:

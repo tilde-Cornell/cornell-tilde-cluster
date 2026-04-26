@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# tilde-node — manage your Slurm compute node contribution
+#
+# Usage:
+#   ./tilde-node start      Register 4 CPU cores with the cluster
+#   ./tilde-node stop       Release your cores and shut down
+#   ./tilde-node status     Show node state and live queue
+#   ./tilde-node logs       Tail daemon logs
+#   ./tilde-node build      (Re)build Docker images after config changes
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/slurm/docker-compose.yml"
+COORDINATOR_DIR="$SCRIPT_DIR/coordinator"
+
+_compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
+
+_wait_for_slurm() {
+    echo "Waiting for Slurm to be ready..."
+    local tries=0
+    until docker exec slurmctld scontrol ping 2>/dev/null | grep -q "UP\|is UP"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 40 ]; then
+            echo "ERROR: slurmctld did not come up in time."
+            echo "Run './tilde-node logs' to investigate."
+            exit 1
+        fi
+        sleep 3
+    done
+}
+
+cmd="${1:-help}"
+
+case "$cmd" in
+
+# ── start ──────────────────────────────────────────────────────────────────────
+start)
+    echo "=== tilde@Cornell — starting compute node (4 CPUs) ==="
+    echo
+    echo "Building images (first run may take a minute)..."
+    _compose build --quiet
+
+    echo "Starting slurmctld + slurmd..."
+    _compose up -d
+
+    _wait_for_slurm
+
+    echo
+    echo "=== Node registered. Slurm reports: ==="
+    docker exec slurmctld sinfo
+    echo
+    echo "Your 4 cores are now available to the cluster."
+    echo "slurmd heartbeats slurmctld every ~30s automatically."
+    echo
+    echo "Start the coordinator (in a separate terminal):"
+    echo "  cd coordinator && uvicorn main:app --host 0.0.0.0 --port 8000"
+    ;;
+
+# ── stop ───────────────────────────────────────────────────────────────────────
+stop)
+    echo "Draining node (waiting for running jobs to finish)..."
+    docker exec slurmctld scontrol update NodeName=node01 State=DRAIN Reason="tilde-node stop" 2>/dev/null || true
+    # Give running jobs up to 30s to finish before hard-stopping
+    sleep 5
+    _compose down
+    echo "Node stopped. Cores returned."
+    ;;
+
+# ── status ─────────────────────────────────────────────────────────────────────
+status)
+    echo "=== Node state ==="
+    docker exec slurmctld sinfo
+    echo
+    echo "=== Queue ==="
+    docker exec slurmctld squeue
+    ;;
+
+# ── logs ───────────────────────────────────────────────────────────────────────
+logs)
+    _compose logs -f --tail=50
+    ;;
+
+# ── build ──────────────────────────────────────────────────────────────────────
+build)
+    _compose build
+    echo "Images rebuilt. Run './tilde-node start' to apply."
+    ;;
+
+# ── help ───────────────────────────────────────────────────────────────────────
+help|*)
+    cat <<'EOF'
+tilde-node — contribute compute to the tilde@Cornell cluster
+
+  ./tilde-node start    Build images, start Slurm, register 4 CPU cores
+  ./tilde-node stop     Drain jobs, shut down containers, release cores
+  ./tilde-node status   Show live node state and job queue
+  ./tilde-node logs     Tail slurmctld + slurmd logs
+  ./tilde-node build    Rebuild Docker images after editing conf/ or Dockerfile
+
+Then in a separate terminal, run the coordinator API:
+  cd coordinator
+  pip install -r requirements.txt
+  uvicorn main:app --host 0.0.0.0 --port 8000
+
+Submit jobs with:
+  python coordinator/client.py submit myscript.py
+  python coordinator/client.py submit myscript.py --cpus 2 --input '{"n": 100}'
+  python coordinator/client.py status <job_id> --watch
+  python coordinator/client.py nodes
+EOF
+    ;;
+esac

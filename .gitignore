@@ -1,0 +1,6 @@
+coordinator/coordinator.sqlite3
+coordinator/__pycache__/
+**/__pycache__/
+**/.venv/
+*.pyc
+docs/
